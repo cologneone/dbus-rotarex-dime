@@ -43,6 +43,10 @@ Details zum vollständigen GATT-Mapping stehen in
 - `dbus_fast` (Python) muss auf dem Gerät verfügbar sein
 - Eine Alugas/Rotarex-Flasche mit DIME/SRG-1-WAVE-Modul in Bluetooth-Reichweite
 
+`install.sh` prüft das alles vorab und sagt, was fehlt — lieber eine klare
+Meldung als später ein Bluetooth-Fehler, der in Wahrheit ein fehlendes
+Python-Modul ist.
+
 ## Installation
 
 ```bash
@@ -51,25 +55,30 @@ cd dbus-rotarex-dime
 bash install.sh
 ```
 
-Das Script kopiert `scripts/read_gas_level.py` nach
+Das Script landet in
 `/data/home/nodered/.node-red/dbus-rotarex-dime/scripts/`. Alles unterhalb von
 `/data/` überlebt Venus-OS-Firmware-Updates; dieser Unterordner gehört
 zusätzlich dem Benutzer `nodered` und ist damit der einzige Ort, an dem
-Node-RED später auch die Historie anlegen darf. Ein anderer Zielordner geht mit
-`INSTALL_DIR=/pfad/nach/wunsch bash install.sh`.
+Node-RED später auch Konfiguration und Historie anlegen darf. Ein anderer
+Zielordner geht mit `INSTALL_DIR=/pfad/nach/wunsch bash install.sh`.
 
 Danach:
 
 1. **Eigene Flasche finden** (siehe unten) — MAC-Adresse und PIN notieren
-2. `flows/rotarex-gasflasche.json` in Node-RED importieren (Menü → Import)
-3. Im `exec`-Node den Skriptpfad prüfen und die eigenen Werte eintragen:
+2. Beides in die angelegte Konfigurationsdatei eintragen:
 
    ```bash
-   ROTAREX_MAC=AA:BB:CC:DD:EE:FF ROTAREX_PIN=1234 \
+   nano /data/home/nodered/.node-red/dbus-rotarex-dime/config
+   ```
+
+3. Kurztest — die letzte Zeile muss `"ok": true` enthalten:
+
+   ```bash
    python3 /data/home/nodered/.node-red/dbus-rotarex-dime/scripts/read_gas_level.py
    ```
 
-4. Deploy
+4. `flows/rotarex-gasflasche.json` in Node-RED importieren (Menü → Import),
+   Deploy klicken. Im Flow ist nichts mehr einzutragen.
 
 So sieht der Flow danach aus — Timer, Auslese-Node, Parser, MQTT und der
 virtuelle Tank:
@@ -78,17 +87,48 @@ virtuelle Tank:
 
 ### Konfiguration
 
-Alles über Umgebungsvariablen, nichts wird im Code eingetragen:
+Alles über benannte Einstellungen, nichts wird im Code eingetragen. Gelesen
+wird aus der Konfigurationsdatei
+`/data/home/nodered/.node-red/dbus-rotarex-dime/config` (Zeilen der Form
+`NAME=Wert`, `#` leitet einen Kommentar ein). **Umgebungsvariablen gleichen
+Namens haben Vorrang**, wer also lieber alles im `exec`-Node stehen hat, kann
+das weiterhin tun.
 
-| Variable | Pflicht | Bedeutung |
+| Name | Pflicht | Bedeutung |
 |---|---|---|
 | `ROTAREX_MAC` | ja | MAC-Adresse der eigenen Flasche, Format `AA:BB:CC:DD:EE:FF` |
 | `ROTAREX_PIN` | ja | PIN vom Typenschild der BLE-Box |
 | `ROTAREX_ADAPTER` | nein | Bluetooth-Adapter, Standard `hci0` |
 | `ROTAREX_HISTORY` | nein | Pfad zu einer CSV-Datei; ist er gesetzt, wird jeder **erfolgreiche** Abruf dort angehängt |
+| `ROTAREX_CONFIG` | nein | Abweichender Pfad der Konfigurationsdatei |
+
+Die Konfigurationsdatei bekommt vom Installer die Rechte `600`. Der Grund für
+die Trennung: Ein exportierter Node-RED-Flow wandert schnell mal in ein Forum
+oder auf einen Screenshot — der PIN sollte da nicht mitfahren.
 
 Fehlen MAC oder PIN, bricht das Script sofort mit `{"ok": false, "error":
 "not_configured"}` ab, statt in einen Bluetooth-Fehler zu laufen.
+
+### Fehlercodes
+
+Die letzte Ausgabezeile ist immer JSON. `"ok": true` bedeutet, dass wirklich
+ein Füllstand gelesen wurde — nie einfach nur, dass das Script durchgelaufen
+ist.
+
+| `error` | Bedeutung |
+|---|---|
+| `not_configured` | MAC oder PIN fehlen |
+| `device_not_in_cache` | BlueZ kennt das Gerät nicht — außer Reichweite oder Bluetooth aus |
+| `connect_failed` | Verbindung kam nicht zustande |
+| `services_not_resolved` | verbunden, aber der GATT-Baum kam nicht |
+| `pin_characteristic_not_found` | PIN-Characteristic fehlt — anderes Gerät? |
+| `gas_characteristic_not_found` | Füllstand-Characteristic fehlt |
+| `pin_write_failed` | PIN ließ sich nicht schreiben (Details in `detail`) |
+| `gas_read_failed` | Lesen scheiterte — bei `ATT error: 0x80` hat der PIN nicht gegriffen |
+| `gas_value_empty` | Lesen ging durch, lieferte aber kein Byte |
+
+Der Batteriestand des Senders ist bewusst optional: Fehlt er, gilt der Abruf
+trotzdem als erfolgreich, und der Grund steht als `battery_error` dabei.
 
 ### Tank im GX einrichten
 
@@ -100,6 +140,13 @@ Unter *Setup* noch Kapazität und Flüssigkeitstyp setzen — für eine 11-kg-Fl
 sind das 21 Liter und LPG. Den Rest rechnet die Oberfläche selbst:
 
 ![Tank-Einstellungen im Cerbo: Kapazität 21 Liter, Flüssigkeitstyp LPG](docs/cerbo-lpg-setup.png)
+
+**Zu beachten:** Der Funktionsknoten im Flow schickt `/Capacity` und
+`/FluidType` bei *jedem* Abruf mit. Eine abweichende Einstellung in der
+GX-Oberfläche ist damit spätestens nach 15 Minuten wieder überschrieben. Wer
+seine Kapazität lieber dort pflegt, nimmt die beiden Felder im Knoten heraus —
+wer eine andere Flaschengröße hat, trägt sie dort ein (Angabe in m³, `0.021`
+sind 21 Liter).
 
 ### Historie mitschreiben
 
@@ -136,20 +183,22 @@ geräteindividuell.
 
 ## Kalibrierung
 
-Der Rohwert ist ein einzelnes Byte und entspricht **direkt dem
-Prozent-Füllstand** — kein Offset, keine Kurve.
+Der Rohwert ist ein einzelnes Byte. Nach bisherigem Stand entspricht er
+**direkt dem Prozent-Füllstand** — in den vorliegenden Messpunkten war kein
+Offset und keine Kurve nötig.
 
-Bestätigt gleich zweifach: an einem Messpunkt außerhalb der oberen Sättigung
-(Rohwert 78 bei App-Anzeige 78 %) und im direkten Vergleich zur selben Zeit —
-App 60 %, Cerbo zwei Minuten zuvor 61 %, was genau dem 15-Minuten-Takt
-entspricht.
+Belegt ist das durch zwei unabhängige Beobachtungen: einen Messpunkt außerhalb
+der oberen Sättigung (Rohwert 78 bei App-Anzeige 78 %) und einen zeitnahen
+Vergleich — App 60 %, Cerbo zwei Minuten zuvor 61 %, was genau dem
+15-Minuten-Takt entspricht.
 
 <img src="docs/app-trend.png" alt="Rotarex-App mit 60 Prozent und fallendem Trenddiagramm" width="320">
 
-Am oberen Ende der Skala ist die Auflösung allerdings gering — die offizielle
-App zeigt für den gesamten Bereich 94–100 % nur „voll“ an. Ob die Zuordnung
-über den ganzen Bereich linear bleibt, muss sich über weitere Referenzpunkte
-zeigen. Beiträge und Issues mit euren Beobachtungen sind willkommen.
+Zwei Punkte im oberen Mittelfeld sind aber kein Beweis für den ganzen Bereich.
+Unten fehlen bislang Referenzwerte schlicht deshalb, weil die Flasche dazu erst
+leer werden muss. Und am oberen Ende ist die Auflösung ohnehin gering — die
+offizielle App zeigt für den gesamten Bereich 94–100 % nur „voll“ an. Wer
+eigene Messpunkte hat, gerne her damit: Beiträge und Issues sind willkommen.
 
 ## Script aktualisieren
 
@@ -166,11 +215,11 @@ curl -fsSL -o /data/home/nodered/.node-red/dbus-rotarex-dime/scripts/read_gas_le
 bash uninstall.sh
 ```
 
-Entfernt den `scripts`-Ordner der Installation. Die Historie bleibt absichtlich
-liegen — sie ist das Einzige hier, was sich nicht wiederherstellen lässt; mit
-`MIT_HISTORIE=ja bash uninstall.sh` verschwindet auch sie. Den Node-RED-Flow
-und den virtuellen Tank-Service musst du selbst löschen — das Script sagt dir,
-wie.
+Entfernt Script und Konfigurationsdatei — in der steht der PIN, die geht als
+Erstes. Die Historie bleibt absichtlich liegen: Sie ist das Einzige hier, was
+sich nicht wiederherstellen lässt; mit `MIT_HISTORIE=ja bash uninstall.sh`
+verschwindet auch sie. Den Node-RED-Flow und den virtuellen Tank-Service musst
+du selbst löschen — das Script sagt dir, wie.
 
 ## Bekannte Stolperfallen
 
@@ -186,7 +235,11 @@ wie.
 - Node-RED läuft als Benutzer `nodered` ohne Schreibrecht auf `/data/`.
 - Das BLE-Modul lässt **nur eine Verbindung gleichzeitig** zu. Solange die
   Rotarex-App verbunden ist, läuft der Abruf auf dem Cerbo ins Leere — und
-  umgekehrt.
+  umgekehrt. Deshalb trennt das Script am Ende immer, auch im Fehlerfall.
+- Ein Abruf kann im schlechtesten Fall (Gerät nicht im Cache, mehrere
+  Discovery- und Connect-Durchgänge) knapp anderthalb Minuten dauern. Der
+  Timeout des `exec`-Node steht deshalb auf 90 Sekunden — wer ihn kleiner
+  setzt, bekommt gelegentlich abgeschnittene Läufe.
 
 ## Danksagung
 
