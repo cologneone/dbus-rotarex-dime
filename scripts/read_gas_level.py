@@ -8,6 +8,13 @@ DIME/SRG-1-WAVE Bluetooth-Modul über BlueZ (D-Bus), ohne bleak oder gatttool.
 Getestet auf Venus OS (Victron Cerbo GX), sollte auf jedem Linux-System mit
 BlueZ und dbus_fast funktionieren.
 
+Version: 1.1.0
+Historie:
+  1.0.0 — Erstveröffentlichung
+  1.1.0 — MAC und PIN kommen aus Umgebungsvariablen statt fest aus dem Code;
+          optionale CSV-Historie; klare Fehlermeldung bei fehlender
+          Konfiguration
+
 Gibt ein einzeiliges JSON-Objekt auf stdout aus, z.B.:
     {"ok": true, "gas_raw": 99, "gas_percent": 99, "battery_percent": 86}
 oder im Fehlerfall:
@@ -17,27 +24,68 @@ WICHTIG bei der Verarbeitung der Ausgabe: Diagnose-/Retry-Meldungen können
 vor dem eigentlichen JSON auf stdout landen. Nur die LETZTE Zeile ist
 garantiert valides JSON.
 
-Konfiguration (bitte an das eigene Gerät anpassen):
-    DEVICE_PATH  - BlueZ-Objektpfad, enthält die MAC-Adresse der eigenen
-                   Flasche (siehe README für den Scan-Vorgang)
-    PIN_BYTES    - der 4-stellige PIN vom Typenschild der BLE-Box, als
-                   ASCII-Text
+Konfiguration über Umgebungsvariablen:
+    ROTAREX_MAC      MAC-Adresse der eigenen Flasche, z.B. AA:BB:CC:DD:EE:FF
+                     (steht auf dem Typenschild der BLE-Box)
+    ROTAREX_PIN      PIN vom selben Typenschild, z.B. 1234
+    ROTAREX_ADAPTER  Bluetooth-Adapter, Standard: hci0
+    ROTAREX_HISTORY  Optional: Pfad zu einer CSV-Datei. Ist er gesetzt,
+                     wird jeder Abruf dort als Zeile angehängt.
+
+Aufruf zum Beispiel:
+    ROTAREX_MAC=AA:BB:CC:DD:EE:FF ROTAREX_PIN=1234 python3 read_gas_level.py
 """
 
 import asyncio
 import json
+import os
 import sys
+import time
 
 from dbus_fast.aio import MessageBus
 from dbus_fast import BusType
 
-# --- Konfiguration: An die eigene Flasche anpassen ---------------------
-DEVICE_PATH = "/org/bluez/hci0/dev_84_BA_20_FF_B3_51"  # MAC mit "_" statt ":"
+# --- Konfiguration -----------------------------------------------------
+MAC = os.environ.get("ROTAREX_MAC", "").strip().upper()
+PIN = os.environ.get("ROTAREX_PIN", "").strip()
+ADAPTER = os.environ.get("ROTAREX_ADAPTER", "hci0").strip()
+HISTORY_FILE = os.environ.get("ROTAREX_HISTORY", "").strip()
+
+ADAPTER_PATH = f"/org/bluez/{ADAPTER}"
+DEVICE_PATH = f"{ADAPTER_PATH}/dev_" + MAC.replace(":", "_")
+
+# Diese UUIDs sind bei allen Geräten dieser Modellreihe gleich.
 GAS_UUID = "2b67836b-183d-45da-a1bf-381b05e1bde8"
 PIN_UUID = "05f5d47f-183d-45da-a1bf-381b05e1bde8"
 BATTERY_UUID = "00002a19-0000-1000-8000-00805f9b34fb"  # Standard BLE Battery Level
-PIN_BYTES = list(b"5907")  # PIN vom Typenschild der BLE-Box
-# -------------------------------------------------------------------------
+# -----------------------------------------------------------------------
+
+
+def ausgeben(result):
+    """JSON auf stdout, optional zusätzlich eine Zeile in die Historie."""
+    print(json.dumps(result))
+    if not HISTORY_FILE:
+        return
+    try:
+        neu = not os.path.exists(HISTORY_FILE)
+        ordner = os.path.dirname(HISTORY_FILE)
+        if ordner:
+            os.makedirs(ordner, exist_ok=True)
+        with open(HISTORY_FILE, "a") as datei:
+            if neu:
+                datei.write("zeitstempel,gas_raw,gas_percent,battery_percent,fehler\n")
+            datei.write(
+                "%s,%s,%s,%s,%s\n"
+                % (
+                    time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    result.get("gas_raw", ""),
+                    result.get("gas_percent", ""),
+                    result.get("battery_percent", ""),
+                    result.get("error", ""),
+                )
+            )
+    except Exception:
+        pass  # Historie ist Beiwerk, sie darf den Abruf nie scheitern lassen
 
 
 async def get_device(bus, max_tries=6):
@@ -47,10 +95,8 @@ async def get_device(bus, max_tries=6):
     laengere Zeit kein aktiver Scan/Verbindung bestand - deshalb hier
     noetigenfalls ein kurzer Discovery-Lauf VOR jedem Introspect-Versuch.
     """
-    adapter_introspection = await bus.introspect("org.bluez", "/org/bluez/hci0")
-    adapter_obj = bus.get_proxy_object(
-        "org.bluez", "/org/bluez/hci0", adapter_introspection
-    )
+    adapter_introspection = await bus.introspect("org.bluez", ADAPTER_PATH)
+    adapter_obj = bus.get_proxy_object("org.bluez", ADAPTER_PATH, adapter_introspection)
     adapter = adapter_obj.get_interface("org.bluez.Adapter1")
 
     for attempt in range(max_tries):
@@ -117,18 +163,28 @@ async def read_byte(bus, path):
 
 async def main():
     result = {"ok": False}
+
+    if not MAC or not PIN:
+        result["error"] = "not_configured"
+        result["hinweis"] = (
+            "ROTAREX_MAC und ROTAREX_PIN setzen — beides steht auf dem "
+            "Typenschild der BLE-Box. Siehe README."
+        )
+        ausgeben(result)
+        return
+
     try:
         bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
 
         adapter, device, props_dev = await get_device(bus)
         if device is None:
             result["error"] = "device_not_in_cache"
-            print(json.dumps(result))
+            ausgeben(result)
             return
 
         if not await connect_with_retry(device, props_dev):
             result["error"] = "connect_failed"
-            print(json.dumps(result))
+            ausgeben(result)
             return
 
         # Auf ServicesResolved warten, sonst sind die Characteristics
@@ -143,14 +199,12 @@ async def main():
             await asyncio.sleep(0.5)
         if not resolved:
             result["error"] = "services_not_resolved"
-            print(json.dumps(result))
+            ausgeben(result)
             return
 
         root_introspection = await bus.introspect("org.bluez", "/")
         root_obj = bus.get_proxy_object("org.bluez", "/", root_introspection)
-        object_manager = root_obj.get_interface(
-            "org.freedesktop.DBus.ObjectManager"
-        )
+        object_manager = root_obj.get_interface("org.freedesktop.DBus.ObjectManager")
         objects = await object_manager.call_get_managed_objects()
 
         pin_path = find_characteristic(objects, PIN_UUID)
@@ -165,7 +219,7 @@ async def main():
             pin_introspection = await bus.introspect("org.bluez", pin_path)
             pin_obj = bus.get_proxy_object("org.bluez", pin_path, pin_introspection)
             pin_iface = pin_obj.get_interface("org.bluez.GattCharacteristic1")
-            await pin_iface.call_write_value(bytearray(PIN_BYTES), {})
+            await pin_iface.call_write_value(bytearray(PIN.encode("ascii")), {})
             await asyncio.sleep(0.4)
 
         gas_raw = await read_byte(bus, gas_path) if gas_path else None
@@ -180,11 +234,11 @@ async def main():
         result["gas_raw"] = gas_raw
         result["gas_percent"] = min(gas_raw, 100) if gas_raw is not None else None
         result["battery_percent"] = battery_raw
-        print(json.dumps(result))
+        ausgeben(result)
 
     except Exception as exc:  # noqa: BLE001 - bewusst breit, Ergebnis geht immer raus
         result["error"] = str(exc)
-        print(json.dumps(result))
+        ausgeben(result)
 
 
 if __name__ == "__main__":
