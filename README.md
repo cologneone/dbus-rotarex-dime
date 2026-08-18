@@ -51,8 +51,14 @@ cd dbus-rotarex-dime
 bash install.sh
 ```
 
-Das Script kopiert `scripts/read_gas_level.py` nach `/data/dbus-rotarex-dime/`
-(überlebt Venus-OS-Firmware-Updates). Danach:
+Das Script kopiert `scripts/read_gas_level.py` nach
+`/data/home/nodered/.node-red/dbus-rotarex-dime/scripts/`. Alles unterhalb von
+`/data/` überlebt Venus-OS-Firmware-Updates; dieser Unterordner gehört
+zusätzlich dem Benutzer `nodered` und ist damit der einzige Ort, an dem
+Node-RED später auch die Historie anlegen darf. Ein anderer Zielordner geht mit
+`INSTALL_DIR=/pfad/nach/wunsch bash install.sh`.
+
+Danach:
 
 1. **Eigene Flasche finden** (siehe unten) — MAC-Adresse und PIN notieren
 2. `flows/rotarex-gasflasche.json` in Node-RED importieren (Menü → Import)
@@ -60,7 +66,7 @@ Das Script kopiert `scripts/read_gas_level.py` nach `/data/dbus-rotarex-dime/`
 
    ```bash
    ROTAREX_MAC=AA:BB:CC:DD:EE:FF ROTAREX_PIN=1234 \
-   python3 /data/dbus-rotarex-dime/scripts/read_gas_level.py
+   python3 /data/home/nodered/.node-red/dbus-rotarex-dime/scripts/read_gas_level.py
    ```
 
 4. Deploy
@@ -79,7 +85,7 @@ Alles über Umgebungsvariablen, nichts wird im Code eingetragen:
 | `ROTAREX_MAC` | ja | MAC-Adresse der eigenen Flasche, Format `AA:BB:CC:DD:EE:FF` |
 | `ROTAREX_PIN` | ja | PIN vom Typenschild der BLE-Box |
 | `ROTAREX_ADAPTER` | nein | Bluetooth-Adapter, Standard `hci0` |
-| `ROTAREX_HISTORY` | nein | Pfad zu einer CSV-Datei; ist er gesetzt, wird jeder Abruf dort angehängt |
+| `ROTAREX_HISTORY` | nein | Pfad zu einer CSV-Datei; ist er gesetzt, wird jeder **erfolgreiche** Abruf dort angehängt |
 
 Fehlen MAC oder PIN, bricht das Script sofort mit `{"ok": false, "error":
 "not_configured"}` ab, statt in einen Bluetooth-Fehler zu laufen.
@@ -101,9 +107,17 @@ sind das 21 Liter und LPG. Den Rest rechnet die Oberfläche selbst:
 ROTAREX_HISTORY=/data/home/nodered/.node-red/dbus-rotarex-dime/history.csv
 ```
 
-Spalten: Zeitstempel, Rohwert, Prozent, Batteriestand, Fehler. Praktisch, um
-den Verbrauch über eine Saison auszuwerten und weitere Kalibrierpunkte zu
-sammeln.
+Vier Spalten, keine Kopfzeile, Zeitstempel in UTC nach ISO 8601:
+
+```
+2026-08-18T21:59:29.695961+00:00,60,60,81
+```
+
+Also `Zeitstempel,Rohwert,Prozent,Sender-Batterie`. Geschrieben wird nur bei
+erfolgreichem Abruf — eine Historie, in der Fehlversuche als leere Werte
+stehen, verzerrt jede spätere Verbrauchsauswertung. Scheitert das Schreiben,
+steht der Grund als `history_error` im JSON-Ergebnis, und der Flow zeigt ihn in
+der Statuszeile an.
 
 **Achtung bei Venus OS:** Node-RED läuft als Benutzer `nodered` und darf
 nicht direkt nach `/data/` schreiben. Beschreibbar ist
@@ -126,16 +140,25 @@ Der Rohwert ist ein einzelnes Byte und entspricht **direkt dem
 Prozent-Füllstand** — kein Offset, keine Kurve.
 
 Bestätigt gleich zweifach: an einem Messpunkt außerhalb der oberen Sättigung
-(Rohwert 78 bei App-Anzeige 78 %) und im direkten Vergleich zur selben Zeit —
-App 60 %, Cerbo zwei Minuten zuvor 61 %, was genau dem 15-Minuten-Takt
+(Rohwert 78 bei App-Anzeige 78 %) und im direkten Vergleich zur selben Zeit —
+App 60 %, Cerbo zwei Minuten zuvor 61 %, was genau dem 15-Minuten-Takt
 entspricht.
 
 <img src="docs/app-trend.png" alt="Rotarex-App mit 60 Prozent und fallendem Trenddiagramm" width="320">
 
 Am oberen Ende der Skala ist die Auflösung allerdings gering — die offizielle
-App zeigt für den gesamten Bereich 94–100 % nur „voll“ an. Ob die Zuordnung
+App zeigt für den gesamten Bereich 94–100 % nur „voll“ an. Ob die Zuordnung
 über den ganzen Bereich linear bleibt, muss sich über weitere Referenzpunkte
 zeigen. Beiträge und Issues mit euren Beobachtungen sind willkommen.
+
+## Script aktualisieren
+
+Ohne erneutes Auschecken, direkt auf dem Gerät:
+
+```bash
+curl -fsSL -o /data/home/nodered/.node-red/dbus-rotarex-dime/scripts/read_gas_level.py \
+  https://raw.githubusercontent.com/cologneone/dbus-rotarex-dime/main/scripts/read_gas_level.py
+```
 
 ## Deinstallation
 
@@ -143,8 +166,11 @@ zeigen. Beiträge und Issues mit euren Beobachtungen sind willkommen.
 bash uninstall.sh
 ```
 
-Entfernt `/data/dbus-rotarex-dime`. Den Node-RED-Flow und den virtuellen
-Tank-Service musst du selbst löschen — das Script sagt dir, wie.
+Entfernt den `scripts`-Ordner der Installation. Die Historie bleibt absichtlich
+liegen — sie ist das Einzige hier, was sich nicht wiederherstellen lässt; mit
+`MIT_HISTORIE=ja bash uninstall.sh` verschwindet auch sie. Den Node-RED-Flow
+und den virtuellen Tank-Service musst du selbst löschen — das Script sagt dir,
+wie.
 
 ## Bekannte Stolperfallen
 
@@ -158,6 +184,9 @@ Tank-Service musst du selbst löschen — das Script sagt dir, wie.
 - Node-RED-`exec`-Node-Ausgabe kann mehrzeilig sein (Diagnosemeldungen vor
   dem JSON) — beim Parsen immer nur die letzte Zeile als JSON behandeln.
 - Node-RED läuft als Benutzer `nodered` ohne Schreibrecht auf `/data/`.
+- Das BLE-Modul lässt **nur eine Verbindung gleichzeitig** zu. Solange die
+  Rotarex-App verbunden ist, läuft der Abruf auf dem Cerbo ins Leere — und
+  umgekehrt.
 
 ## Danksagung
 
