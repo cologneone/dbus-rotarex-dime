@@ -8,7 +8,7 @@ DIME/SRG-1-WAVE Bluetooth-Modul über BlueZ (D-Bus), ohne bleak oder gatttool.
 Getestet auf Venus OS (Victron Cerbo GX), sollte auf jedem Linux-System mit
 BlueZ und dbus_fast funktionieren.
 
-Version: 1.2.0
+Version: 1.3.0
 Historie:
   1.0.0 — Erstveröffentlichung
   1.1.0 — MAC und PIN kommen aus Umgebungsvariablen statt fest aus dem Code;
@@ -17,26 +17,50 @@ Historie:
   1.2.0 — Historie schreibt vier Spalten ohne Kopfzeile mit UTC-Zeitstempel
           und nur bei erfolgreichem Abruf; Schreibfehler landen als
           history_error im Ergebnis
+  1.3.0 — "ok" bedeutet jetzt wirklich, dass ein Füllstand gelesen wurde:
+          fehlende Characteristics und fehlgeschlagene Zugriffe haben
+          eigene Fehlercodes. Verbindung wird immer getrennt, auch wenn
+          unterwegs etwas schiefgeht. Konfiguration wahlweise aus einer
+          Datei, damit MAC und PIN nicht im Node-RED-Flow stehen müssen.
 
 Gibt ein einzeiliges JSON-Objekt auf stdout aus, z.B.:
     {"ok": true, "gas_raw": 99, "gas_percent": 99, "battery_percent": 86}
 oder im Fehlerfall:
     {"ok": false, "error": "connect_failed"}
 
+Mögliche Fehlercodes:
+    not_configured                  MAC oder PIN fehlen
+    device_not_in_cache             BlueZ kennt das Gerät nicht (außer Reichweite?)
+    connect_failed                  Verbindung kam nicht zustande
+    services_not_resolved           verbunden, aber GATT-Baum kam nicht
+    pin_characteristic_not_found    PIN-Characteristic fehlt im GATT-Baum
+    gas_characteristic_not_found    Füllstand-Characteristic fehlt im GATT-Baum
+    pin_write_failed                PIN ließ sich nicht schreiben
+    gas_read_failed                 Lesen des Füllstands scheiterte (ohne PIN: ATT 0x80)
+    gas_value_empty                 Lesen ging durch, lieferte aber kein Byte
+
+Der Batteriestand ist bewusst optional: Fehlt er, ist der Abruf trotzdem
+erfolgreich, und der Grund steht als battery_error dabei.
+
 WICHTIG bei der Verarbeitung der Ausgabe: Diagnose-/Retry-Meldungen können
 vor dem eigentlichen JSON auf stdout landen. Nur die LETZTE Zeile ist
 garantiert valides JSON.
 
-Konfiguration über Umgebungsvariablen:
+Konfiguration — Umgebungsvariablen haben immer Vorrang, sonst wird eine
+Konfigurationsdatei mit Zeilen der Form NAME=Wert gelesen:
+
     ROTAREX_MAC      MAC-Adresse der eigenen Flasche, z.B. AA:BB:CC:DD:EE:FF
                      (steht auf dem Typenschild der BLE-Box)
     ROTAREX_PIN      PIN vom selben Typenschild, z.B. 1234
     ROTAREX_ADAPTER  Bluetooth-Adapter, Standard: hci0
     ROTAREX_HISTORY  Optional: Pfad zu einer CSV-Datei. Ist er gesetzt,
-                     wird jeder erfolgreiche Abruf dort als Zeile angehängt.
+                     wird jeder erfolgreiche Abruf dort angehängt.
+    ROTAREX_CONFIG   Pfad der Konfigurationsdatei, Standard siehe unten.
 
 Aufruf zum Beispiel:
     ROTAREX_MAC=AA:BB:CC:DD:EE:FF ROTAREX_PIN=1234 python3 read_gas_level.py
+oder, mit ausgefüllter Konfigurationsdatei, schlicht:
+    python3 read_gas_level.py
 """
 
 import asyncio
@@ -49,10 +73,46 @@ from dbus_fast.aio import MessageBus
 from dbus_fast import BusType
 
 # --- Konfiguration -----------------------------------------------------
-MAC = os.environ.get("ROTAREX_MAC", "").strip().upper()
-PIN = os.environ.get("ROTAREX_PIN", "").strip()
-ADAPTER = os.environ.get("ROTAREX_ADAPTER", "hci0").strip()
-HISTORY_FILE = os.environ.get("ROTAREX_HISTORY", "").strip()
+
+STANDARD_CONFIG = "/data/home/nodered/.node-red/dbus-rotarex-dime/config"
+
+
+def _konfigurationsdatei_lesen(pfad):
+    """
+    Liest Zeilen der Form NAME=Wert. Leerzeilen und alles ab '#' wird
+    ignoriert, Anführungszeichen um den Wert werden entfernt. Fehlt die
+    Datei, ist das kein Fehler — dann zählen eben nur die Umgebungsvariablen.
+    """
+    werte = {}
+    try:
+        with open(pfad) as datei:
+            for zeile in datei:
+                zeile = zeile.split("#", 1)[0].strip()
+                if not zeile or "=" not in zeile:
+                    continue
+                name, _, wert = zeile.partition("=")
+                werte[name.strip()] = wert.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return werte
+
+
+CONFIG_FILE = os.environ.get("ROTAREX_CONFIG", "").strip() or STANDARD_CONFIG
+_aus_datei = _konfigurationsdatei_lesen(CONFIG_FILE)
+
+
+def einstellung(name, standard=""):
+    """Umgebungsvariable schlaegt Konfigurationsdatei schlaegt Standardwert."""
+    wert = os.environ.get(name, "").strip()
+    if wert:
+        return wert
+    return _aus_datei.get(name, standard).strip()
+
+
+MAC = einstellung("ROTAREX_MAC").upper()
+PIN = einstellung("ROTAREX_PIN")
+ADAPTER = einstellung("ROTAREX_ADAPTER", "hci0")
+HISTORY_FILE = einstellung("ROTAREX_HISTORY")
 
 ADAPTER_PATH = f"/org/bluez/{ADAPTER}"
 DEVICE_PATH = f"{ADAPTER_PATH}/dev_" + MAC.replace(":", "_")
@@ -176,12 +236,14 @@ async def read_byte(bus, path):
 
 async def main():
     result = {"ok": False}
+    device = None
 
     if not MAC or not PIN:
         result["error"] = "not_configured"
         result["hinweis"] = (
-            "ROTAREX_MAC und ROTAREX_PIN setzen — beides steht auf dem "
-            "Typenschild der BLE-Box. Siehe README."
+            "ROTAREX_MAC und ROTAREX_PIN setzen — als Umgebungsvariablen oder "
+            "in %s. Beides steht auf dem Typenschild der BLE-Box. Siehe README."
+            % CONFIG_FILE
         )
         ausgeben(result)
         return
@@ -224,34 +286,79 @@ async def main():
         gas_path = find_characteristic(objects, GAS_UUID)
         batt_path = find_characteristic(objects, BATTERY_UUID)
 
+        # PIN und Füllstand sind Pflicht. Fehlt eine der beiden
+        # Characteristics, stimmt etwas Grundsätzliches nicht — dann ist
+        # das ein Fehler und kein Abruf mit leerem Wert.
+        if pin_path is None:
+            result["error"] = "pin_characteristic_not_found"
+            ausgeben(result)
+            return
+        if gas_path is None:
+            result["error"] = "gas_characteristic_not_found"
+            ausgeben(result)
+            return
+
         # Der zentrale Trick: PIN als ASCII-Text auf die
         # "versteckte" Characteristic schreiben, BEVOR der Gaslevel
         # gelesen wird. Ohne diesen Schritt liefert der Read auf
         # GAS_UUID immer "ATT error: 0x80".
-        if pin_path:
+        try:
             pin_introspection = await bus.introspect("org.bluez", pin_path)
             pin_obj = bus.get_proxy_object("org.bluez", pin_path, pin_introspection)
             pin_iface = pin_obj.get_interface("org.bluez.GattCharacteristic1")
             await pin_iface.call_write_value(bytearray(PIN.encode("ascii")), {})
-            await asyncio.sleep(0.4)
-
-        gas_raw = await read_byte(bus, gas_path) if gas_path else None
-        battery_raw = await read_byte(bus, batt_path) if batt_path else None
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = "pin_write_failed"
+            result["detail"] = str(exc)
+            ausgeben(result)
+            return
+        await asyncio.sleep(0.4)
 
         try:
-            await device.call_disconnect()
-        except Exception:
-            pass
+            gas_raw = await read_byte(bus, gas_path)
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = "gas_read_failed"
+            result["detail"] = str(exc)
+            ausgeben(result)
+            return
+
+        if gas_raw is None:
+            result["error"] = "gas_value_empty"
+            ausgeben(result)
+            return
+
+        # Der Batteriestand des Senders ist Beiwerk. Fehlt er, ist der
+        # Abruf trotzdem gelungen.
+        battery_raw = None
+        battery_error = None
+        if batt_path is None:
+            battery_error = "battery_characteristic_not_found"
+        else:
+            try:
+                battery_raw = await read_byte(bus, batt_path)
+            except Exception as exc:  # noqa: BLE001
+                battery_error = str(exc)
 
         result["ok"] = True
         result["gas_raw"] = gas_raw
-        result["gas_percent"] = min(gas_raw, 100) if gas_raw is not None else None
+        result["gas_percent"] = min(gas_raw, 100)
         result["battery_percent"] = battery_raw
+        if battery_error:
+            result["battery_error"] = battery_error
         ausgeben(result)
 
     except Exception as exc:  # noqa: BLE001 - bewusst breit, Ergebnis geht immer raus
         result["error"] = str(exc)
         ausgeben(result)
+
+    finally:
+        # Immer trennen. Bleibt die Verbindung stehen, kommt beim nächsten
+        # Poll weder das Handy noch der Cerbo an die Flasche.
+        if device is not None:
+            try:
+                await device.call_disconnect()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

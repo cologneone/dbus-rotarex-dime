@@ -5,11 +5,12 @@
 # und der virtuelle Tank-Service müssen von Hand entfernt werden, das kann
 # ein Script nicht zuverlässig übernehmen.
 #
-# Version: 1.1.0
+# Version: 1.2.0
 # Historie:
 #   1.0.0 — Erstveröffentlichung
 #   1.1.0 — Gleicher Standardpfad wie install.sh; die Historie bleibt
 #           stehen, sofern sie nicht ausdrücklich mit entfernt wird
+#   1.2.0 — Die Konfigurationsdatei wird mit entfernt; in ihr steht der PIN
 #
 # Nutzung (auf dem Cerbo/Venus-OS-Gerät per SSH):
 #   bash uninstall.sh
@@ -29,6 +30,12 @@ if [ -d "$INSTALL_DIR/scripts" ]; then
   rm -rf "$INSTALL_DIR/scripts"
 else
   echo "Nichts zu tun — $INSTALL_DIR/scripts existiert nicht."
+fi
+
+# Darin steht der PIN — die geht als Erstes.
+if [ -f "$INSTALL_DIR/config" ]; then
+  echo "Entferne $INSTALL_DIR/config ..."
+  rm -f "$INSTALL_DIR/config"
 fi
 
 if [ -f "$INSTALL_DIR/history.csv" ]; then
