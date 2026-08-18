@@ -4,6 +4,8 @@ Liest den Füllstand einer **Alugas/Rotarex-Gasflasche mit DIME/SRG-1-WAVE
 Bluetooth-Modul** aus und zeigt sie als echten Tank im **Victron Cerbo GX /
 VRM** an – über Node-RED, ohne bleak, ohne gatttool, direkt per BlueZ/D-Bus.
 
+![Tankanzeige im Cerbo GX: LPG bei 61 Prozent, 13 von 21 Litern](docs/cerbo-tanks.png)
+
 Soweit bekannt, gab es dafür bisher keine funktionierende Lösung (siehe
 [Victron Community](https://community.victronenergy.com/t/rotarex-dimes-wave-bluetooth-and-cerbo-gx/19384)
 und den [Pekaway-Forum-Thread](https://forum.pekaway.de/t/rotarex-dimes-srg-gas-level/1069),
@@ -63,6 +65,11 @@ Das Script kopiert `scripts/read_gas_level.py` nach `/data/dbus-rotarex-dime/`
 
 4. Deploy
 
+So sieht der Flow danach aus — Timer, Auslese-Node, Parser, MQTT und der
+virtuelle Tank:
+
+![Node-RED-Flow mit Poll-Timer, Auslese-Node, Parser und virtuellem Tank](docs/nodered-flow.png)
+
 ### Konfiguration
 
 Alles über Umgebungsvariablen, nichts wird im Code eingetragen:
@@ -76,6 +83,17 @@ Alles über Umgebungsvariablen, nichts wird im Code eingetragen:
 
 Fehlen MAC oder PIN, bricht das Script sofort mit `{"ok": false, "error":
 "not_configured"}` ab, statt in einen Bluetooth-Fehler zu laufen.
+
+### Tank im GX einrichten
+
+Der virtuelle Tank taucht als ganz normales Gerät auf, mit Node-RED als Quelle:
+
+![Gerätedetails im Cerbo: Verbindung Node-RED, Produkt Virtual tank sensor](docs/cerbo-lpg-geraet.png)
+
+Unter *Setup* noch Kapazität und Flüssigkeitstyp setzen — für eine 11-kg-Flasche
+sind das 21 Liter und LPG. Den Rest rechnet die Oberfläche selbst:
+
+![Tank-Einstellungen im Cerbo: Kapazität 21 Liter, Flüssigkeitstyp LPG](docs/cerbo-lpg-setup.png)
 
 ### Historie mitschreiben
 
@@ -105,12 +123,17 @@ geräteindividuell.
 ## Kalibrierung
 
 Der Rohwert ist ein einzelnes Byte und entspricht **direkt dem
-Prozent-Füllstand** — kein Offset, keine Kurve. Bestätigt an einem
-Messpunkt außerhalb der oberen Sättigung: Rohwert 78 bei einer App-Anzeige
-von 78 %.
+Prozent-Füllstand** — kein Offset, keine Kurve.
+
+Bestätigt gleich zweifach: an einem Messpunkt außerhalb der oberen Sättigung
+(Rohwert 78 bei App-Anzeige 78 %) und im direkten Vergleich zur selben Zeit —
+App 60 %, Cerbo zwei Minuten zuvor 61 %, was genau dem 15-Minuten-Takt
+entspricht.
+
+<img src="docs/app-trend.png" alt="Rotarex-App mit 60 Prozent und fallendem Trenddiagramm" width="320">
 
 Am oberen Ende der Skala ist die Auflösung allerdings gering — die offizielle
-App zeigt für den gesamten Bereich 94–100 % nur „voll“ an. Ob die Zuordnung
+App zeigt für den gesamten Bereich 94–100 % nur „voll“ an. Ob die Zuordnung
 über den ganzen Bereich linear bleibt, muss sich über weitere Referenzpunkte
 zeigen. Beiträge und Issues mit euren Beobachtungen sind willkommen.
 
