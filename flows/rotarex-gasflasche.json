@@ -16,14 +16,19 @@
   {
     "type": "tab",
     "label": "Rotarex Gasflasche",
-    "id": "tab_rotarex_gas"
+    "id": "tab_rotarex_gas",
+    "info": "Liest den Fuellstand einer Alugas/Rotarex-Gasflasche ueber BLE aus\nund legt ihn als virtuellen Tank im GX-Geraet ab.\n\nDas Auslesen macht das Script aus diesem Repo:\n/data/home/nodered/.node-red/dbus-rotarex-dime/scripts/read_gas_level.py\n\nMAC, PIN und der Pfad zur Historie stehen als Umgebungsvariablen\nim exec-Node. MAC und PIN stehen auf dem Typenschild der BLE-Box."
   },
   {
     "id": "gas_poll_inject",
     "type": "inject",
     "z": "tab_rotarex_gas",
     "name": "Poll alle 15 Min",
-    "props": [{ "p": "payload" }],
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
     "repeat": "900",
     "crontab": "",
     "once": true,
@@ -33,13 +38,17 @@
     "payloadType": "str",
     "x": 170,
     "y": 100,
-    "wires": [["gas_read_exec"]]
+    "wires": [
+      [
+        "gas_read_exec"
+      ]
+    ]
   },
   {
     "id": "gas_read_exec",
     "type": "exec",
     "z": "tab_rotarex_gas",
-    "command": "ROTAREX_MAC=AA:BB:CC:DD:EE:FF ROTAREX_PIN=1234 ROTAREX_HISTORY=/data/home/nodered/.node-red/dbus-rotarex-dime/history.csv python3 /data/dbus-rotarex-dime/scripts/read_gas_level.py 2>&1",
+    "command": "ROTAREX_MAC=AA:BB:CC:DD:EE:FF ROTAREX_PIN=1234 ROTAREX_ADAPTER=hci0 ROTAREX_HISTORY=/data/home/nodered/.node-red/dbus-rotarex-dime/history.csv python3 /data/home/nodered/.node-red/dbus-rotarex-dime/scripts/read_gas_level.py 2>&1",
     "addpay": false,
     "append": "",
     "useSpawn": "false",
@@ -47,17 +56,23 @@
     "winHide": false,
     "oldrc": false,
     "name": "Gas + Batterie lesen",
-    "info": "MAC und PIN stehen auf dem Typenschild der BLE-Box und muessen hier eingetragen werden. ROTAREX_HISTORY ist optional.",
     "x": 420,
     "y": 100,
-    "wires": [["gas_parse"], [], []]
+    "wires": [
+      [
+        "gas_parse"
+      ],
+      [],
+      []
+    ],
+    "info": "MAC und PIN stehen auf dem Typenschild der BLE-Box und muessen hier eingetragen werden. ROTAREX_ADAPTER und ROTAREX_HISTORY sind optional."
   },
   {
     "id": "gas_parse",
     "type": "function",
     "z": "tab_rotarex_gas",
     "name": "Parse Ergebnis",
-    "func": "let data;\ntry {\n    const lines = msg.payload.trim().split('\\n');\n    const lastLine = lines[lines.length - 1];\n    data = JSON.parse(lastLine);\n} catch (e) {\n    msg.statusText = '⚠️ Parse-Fehler: ' + msg.payload;\n    flow.set('letzterFehler', msg.payload);\n    return [null, null, msg, null];\n}\n\nif (!data.ok) {\n    msg.statusText = '⚠️ Fehler: ' + (data.error || 'unbekannt');\n    flow.set('letzterFehler', data.error || 'unbekannt');\n    return [null, null, msg, null];\n}\n\nconst gasMsg = {\n    payload: data.gas_percent,\n    topic: 'rotarex/gasflasche/prozent'\n};\nconst battMsg = {\n    payload: data.battery_percent,\n    topic: 'rotarex/gasflasche/batterie'\n};\nmsg.statusText = '⛽ Gasflasche: ' + data.gas_percent + '% (roh: ' + data.gas_raw + ') | Sender-Batterie: ' + data.battery_percent + '%';\nflow.set('letzterGasstand', data.gas_percent);\nflow.set('letzteMessung', new Date().toISOString());\nflow.set('letzterFehler', null);\n\n// Kapazität in m³ und FluidType (8 = LPG) hier anpassen:\nconst tankMsg = {\n    payload: {\n        '/Level': data.gas_percent,\n        '/FluidType': 8,\n        '/Capacity': 0.021,\n        '/Status': 0\n    }\n};\n\nreturn [gasMsg, {...msg, ...battMsg}, msg, tankMsg];",
+    "func": "let data;\ntry {\n    const lines = msg.payload.trim().split('\\n');\n    const lastLine = lines[lines.length - 1];\n    data = JSON.parse(lastLine);\n} catch (e) {\n    msg.statusText = '⚠️ Parse-Fehler: ' + msg.payload;\n    flow.set('letzterFehler', msg.payload);\n    return [null, null, msg, null];\n}\n\nif (!data.ok) {\n    msg.statusText = '⚠️ Fehler: ' + (data.error || 'unbekannt');\n    flow.set('letzterFehler', data.error || 'unbekannt');\n    return [null, null, msg, null];\n}\n\nconst gasMsg = {\n    payload: data.gas_percent,\n    topic: 'rotarex/gasflasche/prozent'\n};\nconst battMsg = {\n    payload: data.battery_percent,\n    topic: 'rotarex/gasflasche/batterie'\n};\nmsg.statusText = '⛽ Gasflasche: ' + data.gas_percent + '% (roh: ' + data.gas_raw + ') | Sender-Batterie: ' + data.battery_percent + '%' + (data.history_error ? ' | ⚠️ History: ' + data.history_error : '');\nflow.set('letzterGasstand', data.gas_percent);\nflow.set('letzteMessung', new Date().toISOString());\nflow.set('letzterFehler', data.history_error || null);\n\n// Kapazitaet in m3 und FluidType (8 = LPG) hier anpassen:\nconst tankMsg = {\n    payload: {\n        '/Level': data.gas_percent,\n        '/FluidType': 8,\n        '/Capacity': 0.021,\n        '/Status': 0\n    }\n};\n\nreturn [gasMsg, {...msg, ...battMsg}, msg, tankMsg];",
     "outputs": 4,
     "timeout": 0,
     "noerr": 0,
@@ -66,7 +81,20 @@
     "libs": [],
     "x": 650,
     "y": 100,
-    "wires": [["gas_mqtt_out"], ["batt_mqtt_out"], ["gas_debug"], ["gas_tank_virtual"]]
+    "wires": [
+      [
+        "gas_mqtt_out"
+      ],
+      [
+        "batt_mqtt_out"
+      ],
+      [
+        "gas_debug"
+      ],
+      [
+        "gas_tank_virtual"
+      ]
+    ]
   },
   {
     "id": "gas_mqtt_out",
@@ -76,6 +104,11 @@
     "topic": "",
     "qos": "0",
     "retain": "true",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
     "broker": "mqtt_broker_cerbo",
     "x": 900,
     "y": 60,
@@ -89,6 +122,11 @@
     "topic": "",
     "qos": "0",
     "retain": "true",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
     "broker": "mqtt_broker_cerbo",
     "x": 900,
     "y": 100,
@@ -120,6 +158,8 @@
     "deviceinstance": "20",
     "x": 920,
     "y": 210,
-    "wires": [[]]
+    "wires": [
+      []
+    ]
   }
 ]
