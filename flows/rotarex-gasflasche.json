@@ -39,7 +39,7 @@
     "id": "gas_read_exec",
     "type": "exec",
     "z": "tab_rotarex_gas",
-    "command": "python3 /data/dbus-rotarex-dime/scripts/read_gas_level.py 2>&1",
+    "command": "ROTAREX_MAC=AA:BB:CC:DD:EE:FF ROTAREX_PIN=1234 ROTAREX_HISTORY=/data/home/nodered/.node-red/dbus-rotarex-dime/history.csv python3 /data/dbus-rotarex-dime/scripts/read_gas_level.py 2>&1",
     "addpay": false,
     "append": "",
     "useSpawn": "false",
@@ -47,6 +47,7 @@
     "winHide": false,
     "oldrc": false,
     "name": "Gas + Batterie lesen",
+    "info": "MAC und PIN stehen auf dem Typenschild der BLE-Box und muessen hier eingetragen werden. ROTAREX_HISTORY ist optional.",
     "x": 420,
     "y": 100,
     "wires": [["gas_parse"], [], []]
