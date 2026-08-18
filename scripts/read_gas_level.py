@@ -8,12 +8,15 @@ DIME/SRG-1-WAVE Bluetooth-Modul über BlueZ (D-Bus), ohne bleak oder gatttool.
 Getestet auf Venus OS (Victron Cerbo GX), sollte auf jedem Linux-System mit
 BlueZ und dbus_fast funktionieren.
 
-Version: 1.1.0
+Version: 1.2.0
 Historie:
   1.0.0 — Erstveröffentlichung
   1.1.0 — MAC und PIN kommen aus Umgebungsvariablen statt fest aus dem Code;
           optionale CSV-Historie; klare Fehlermeldung bei fehlender
           Konfiguration
+  1.2.0 — Historie schreibt vier Spalten ohne Kopfzeile mit UTC-Zeitstempel
+          und nur bei erfolgreichem Abruf; Schreibfehler landen als
+          history_error im Ergebnis
 
 Gibt ein einzeiliges JSON-Objekt auf stdout aus, z.B.:
     {"ok": true, "gas_raw": 99, "gas_percent": 99, "battery_percent": 86}
@@ -30,7 +33,7 @@ Konfiguration über Umgebungsvariablen:
     ROTAREX_PIN      PIN vom selben Typenschild, z.B. 1234
     ROTAREX_ADAPTER  Bluetooth-Adapter, Standard: hci0
     ROTAREX_HISTORY  Optional: Pfad zu einer CSV-Datei. Ist er gesetzt,
-                     wird jeder Abruf dort als Zeile angehängt.
+                     wird jeder erfolgreiche Abruf dort als Zeile angehängt.
 
 Aufruf zum Beispiel:
     ROTAREX_MAC=AA:BB:CC:DD:EE:FF ROTAREX_PIN=1234 python3 read_gas_level.py
@@ -40,7 +43,7 @@ import asyncio
 import json
 import os
 import sys
-import time
+from datetime import datetime, timezone
 
 from dbus_fast.aio import MessageBus
 from dbus_fast import BusType
@@ -62,30 +65,40 @@ BATTERY_UUID = "00002a19-0000-1000-8000-00805f9b34fb"  # Standard BLE Battery Le
 
 
 def ausgeben(result):
-    """JSON auf stdout, optional zusätzlich eine Zeile in die Historie."""
-    print(json.dumps(result))
-    if not HISTORY_FILE:
-        return
-    try:
-        neu = not os.path.exists(HISTORY_FILE)
-        ordner = os.path.dirname(HISTORY_FILE)
-        if ordner:
-            os.makedirs(ordner, exist_ok=True)
-        with open(HISTORY_FILE, "a") as datei:
-            if neu:
-                datei.write("zeitstempel,gas_raw,gas_percent,battery_percent,fehler\n")
-            datei.write(
-                "%s,%s,%s,%s,%s\n"
-                % (
-                    time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    result.get("gas_raw", ""),
-                    result.get("gas_percent", ""),
-                    result.get("battery_percent", ""),
-                    result.get("error", ""),
+    """
+    Schreibt das Ergebnis als eine Zeile JSON auf stdout.
+
+    Ist ROTAREX_HISTORY gesetzt und der Abruf war erfolgreich, wird
+    zusätzlich eine Zeile an die CSV angehängt — vier Spalten, ohne
+    Kopfzeile, Zeitstempel in UTC nach ISO 8601:
+
+        2026-08-18T19:41:03.512844+00:00,78,78,86
+
+    Bewusst nur bei Erfolg: Eine Historie, in der Fehlversuche als leere
+    Werte stehen, verzerrt jede spätere Verbrauchsauswertung.
+    """
+    if HISTORY_FILE and result.get("ok"):
+        try:
+            ordner = os.path.dirname(HISTORY_FILE)
+            if ordner:
+                os.makedirs(ordner, exist_ok=True)
+            zeitstempel = datetime.now(timezone.utc).isoformat()
+            with open(HISTORY_FILE, "a") as datei:
+                datei.write(
+                    "%s,%s,%s,%s\n"
+                    % (
+                        zeitstempel,
+                        result.get("gas_raw"),
+                        result.get("gas_percent"),
+                        result.get("battery_percent"),
+                    )
                 )
-            )
-    except Exception:
-        pass  # Historie ist Beiwerk, sie darf den Abruf nie scheitern lassen
+        except Exception as exc:  # noqa: BLE001
+            # Die Historie ist Beiwerk, sie darf den Abruf nie scheitern
+            # lassen — der Fehler wandert aber sichtbar ins Ergebnis.
+            result["history_error"] = str(exc)
+
+    print(json.dumps(result))
 
 
 async def get_device(bus, max_tries=6):
