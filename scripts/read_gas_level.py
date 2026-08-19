@@ -9,7 +9,7 @@ ohne bleak oder gatttool.
 Getestet auf Venus OS (Victron Cerbo GX), sollte auf jedem Linux-System mit
 BlueZ und dbus_fast funktionieren.
 
-Version: 1.5.0
+Version: 1.5.1
 Historie:
   1.0.0 — Erstveröffentlichung
   1.1.0 — MAC und PIN kommen aus Umgebungsvariablen statt fest aus dem Code;
@@ -35,6 +35,11 @@ Historie:
           das Script jetzt selbst rechtzeitig {"ok": false, "error":
           "timeout"} aus und versucht anschliessend, die Verbindung zu
           loesen.
+  1.5.1 — Die Zeitgrenze ist jetzt wirklich eine: Das Trennen im finally war
+          unbegrenzt, und asyncio.wait_for wartet das Aufraeumen der
+          abgebrochenen Aufgabe ab. Cleanup und Notfall-Trennung haben eigene
+          Budgets, die aus der Gesamtzeit abgezweigt statt oben drauf
+          geschlagen werden.
 
 Gibt ein einzeiliges JSON-Objekt auf stdout aus, z.B.:
     {"ok": true, "gas_raw": 99, "gas_percent": 99, "battery_percent": 86}
@@ -69,8 +74,8 @@ Konfigurationsdatei mit Zeilen der Form NAME=Wert gelesen:
     ROTAREX_ADAPTER  Bluetooth-Adapter, Standard: hci0
     ROTAREX_HISTORY  Optional: Pfad zu einer CSV-Datei. Ist er gesetzt,
                      wird jeder erfolgreiche Abruf dort angehängt.
-    ROTAREX_TIMEOUT  Sekunden, nach denen der Abruf aufgibt. Standard: 85 —
-                     knapp unter dem 90-Sekunden-Timeout des
+    ROTAREX_TIMEOUT  Gesamtbudget in Sekunden, Aufraeumen eingerechnet.
+                     Standard: 85 — knapp unter dem 90-Sekunden-Timeout des
                      Node-RED-exec-Node, damit das Script sein Ergebnis noch
                      selbst ausgeben kann, statt abgeschossen zu werden.
     ROTAREX_CONFIG   Pfad der Konfigurationsdatei. Ohne Angabe wird sie
@@ -143,6 +148,12 @@ try:
     GESAMT_TIMEOUT = float(einstellung("ROTAREX_TIMEOUT", "85"))
 except ValueError:
     GESAMT_TIMEOUT = 85.0
+
+# Aufraeumen kostet Zeit und wird deshalb aus dem Gesamtbudget abgezweigt,
+# nicht oben drauf geschlagen: Sonst waere der versprochene Deckel keiner.
+TRENN_BUDGET = 3.0      # regulaeres Trennen am Ende von main()
+NOTFALL_BUDGET = 5.0    # zweiter Trennversuch nach einem Timeout
+ARBEITS_TIMEOUT = max(5.0, GESAMT_TIMEOUT - TRENN_BUDGET - NOTFALL_BUDGET)
 
 ADAPTER_PATH = f"/org/bluez/{ADAPTER}"
 DEVICE_PATH = f"{ADAPTER_PATH}/dev_" + MAC.replace(":", "_")
@@ -398,11 +409,17 @@ async def main():
         ausgeben(result)
 
     finally:
-        # Immer trennen. Bleibt die Verbindung stehen, kommt beim nächsten
+        # Immer trennen. Bleibt die Verbindung stehen, kommt beim naechsten
         # Poll weder das Handy noch der Cerbo an die Flasche.
+        #
+        # Mit eigener Zeitgrenze: Dieses finally laeuft auch dann, wenn die
+        # Aufgabe wegen Zeitueberschreitung abgebrochen wurde — und
+        # asyncio.wait_for wartet, bis das Aufraeumen durch ist. Ein
+        # unbegrenztes call_disconnect() an dieser Stelle wuerde den ganzen
+        # Deckel aushebeln.
         if device is not None:
             try:
-                await device.call_disconnect()
+                await asyncio.wait_for(device.call_disconnect(), timeout=TRENN_BUDGET)
             except Exception:
                 pass
 
@@ -428,12 +445,18 @@ async def mit_zeitgrenze():
     einfach stehen. Ohne diesen Deckel laeuft ein Abruf von Hand beliebig
     lange weiter, und in Node-RED wird er hart abgeschossen — mit
     abgeschnittener Ausgabe, die dann als Parse-Fehler ankommt.
+
+    Die eigentliche Arbeit bekommt bewusst weniger als das Gesamtbudget:
+    asyncio.wait_for wartet beim Timeout ab, bis die abgebrochene Aufgabe
+    fertig aufgeraeumt hat, und danach folgt noch ein Trennversuch. Beides
+    ist eingepreist, damit ROTAREX_TIMEOUT die Zeit bis zur Ausgabe deckelt
+    und nicht nur die Zeit bis zum Abbruch.
     """
     try:
-        await asyncio.wait_for(main(), timeout=GESAMT_TIMEOUT)
+        await asyncio.wait_for(main(), timeout=ARBEITS_TIMEOUT)
     except asyncio.TimeoutError:
         try:
-            await asyncio.wait_for(notfall_trennen(), timeout=5)
+            await asyncio.wait_for(notfall_trennen(), timeout=NOTFALL_BUDGET)
         except Exception:  # noqa: BLE001
             pass
         ausgeben(
@@ -441,9 +464,12 @@ async def mit_zeitgrenze():
                 "ok": False,
                 "error": "timeout",
                 "detail": (
-                    "kein Ergebnis binnen %.0f Sekunden — meist haelt eine "
-                    "andere Verbindung das Modul besetzt, etwa die "
-                    "Hersteller-App auf dem Handy" % GESAMT_TIMEOUT
+                    "kein Ergebnis binnen %.0f Sekunden. Das Modul laesst nur "
+                    "eine Verbindung gleichzeitig zu — meist haelt eine andere "
+                    "sie besetzt: die Hersteller-App auf dem Handy oder ein "
+                    "zweiter, von Hand gestarteter Abruf. Die regulaeren Polls "
+                    "koennen sich wegen dieser Zeitgrenze nicht gegenseitig "
+                    "blockieren." % ARBEITS_TIMEOUT
                 ),
             }
         )
