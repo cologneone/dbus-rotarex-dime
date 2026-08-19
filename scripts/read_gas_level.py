@@ -3,12 +3,13 @@
 read_gas_level.py
 
 Liest Füllstand und Batteriestand einer Alugas/Rotarex-Gasflasche mit
-DIME/SRG-1-WAVE Bluetooth-Modul über BlueZ (D-Bus), ohne bleak oder gatttool.
+DIMES-WAVE-Bluetooth-Modul (im BLE-Scan als SRG-1-WAVE) über BlueZ (D-Bus),
+ohne bleak oder gatttool.
 
 Getestet auf Venus OS (Victron Cerbo GX), sollte auf jedem Linux-System mit
 BlueZ und dbus_fast funktionieren.
 
-Version: 1.3.0
+Version: 1.4.0
 Historie:
   1.0.0 — Erstveröffentlichung
   1.1.0 — MAC und PIN kommen aus Umgebungsvariablen statt fest aus dem Code;
@@ -22,6 +23,11 @@ Historie:
           eigene Fehlercodes. Verbindung wird immer getrennt, auch wenn
           unterwegs etwas schiefgeht. Konfiguration wahlweise aus einer
           Datei, damit MAC und PIN nicht im Node-RED-Flow stehen müssen.
+  1.4.0 — Die Konfigurationsdatei wird relativ zum Script gesucht, damit ein
+          abweichender Installationsort tatsächlich funktioniert. Keine
+          Wartezeit mehr nach dem jeweils letzten Versuch — das spart im
+          schlechtesten Fall rund 18 Sekunden. Fehlender Batteriestand
+          erzeugt in der Historie ein leeres Feld statt "None".
 
 Gibt ein einzeiliges JSON-Objekt auf stdout aus, z.B.:
     {"ok": true, "gas_raw": 99, "gas_percent": 99, "battery_percent": 86}
@@ -30,12 +36,12 @@ oder im Fehlerfall:
 
 Mögliche Fehlercodes:
     not_configured                  MAC oder PIN fehlen
-    device_not_in_cache             BlueZ kennt das Gerät nicht (außer Reichweite?)
+    device_not_in_cache             BlueZ kennt das Gerät nicht (ausser Reichweite?)
     connect_failed                  Verbindung kam nicht zustande
     services_not_resolved           verbunden, aber GATT-Baum kam nicht
     pin_characteristic_not_found    PIN-Characteristic fehlt im GATT-Baum
     gas_characteristic_not_found    Füllstand-Characteristic fehlt im GATT-Baum
-    pin_write_failed                PIN ließ sich nicht schreiben
+    pin_write_failed                PIN liess sich nicht schreiben
     gas_read_failed                 Lesen des Füllstands scheiterte (ohne PIN: ATT 0x80)
     gas_value_empty                 Lesen ging durch, lieferte aber kein Byte
 
@@ -55,7 +61,10 @@ Konfigurationsdatei mit Zeilen der Form NAME=Wert gelesen:
     ROTAREX_ADAPTER  Bluetooth-Adapter, Standard: hci0
     ROTAREX_HISTORY  Optional: Pfad zu einer CSV-Datei. Ist er gesetzt,
                      wird jeder erfolgreiche Abruf dort angehängt.
-    ROTAREX_CONFIG   Pfad der Konfigurationsdatei, Standard siehe unten.
+    ROTAREX_CONFIG   Pfad der Konfigurationsdatei. Ohne Angabe wird sie
+                     eine Ebene über diesem Script gesucht, also bei einer
+                     Installation nach <ordner>/scripts/read_gas_level.py
+                     unter <ordner>/config.
 
 Aufruf zum Beispiel:
     ROTAREX_MAC=AA:BB:CC:DD:EE:FF ROTAREX_PIN=1234 python3 read_gas_level.py
@@ -68,13 +77,17 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from dbus_fast.aio import MessageBus
 from dbus_fast import BusType
 
 # --- Konfiguration -----------------------------------------------------
 
-STANDARD_CONFIG = "/data/home/nodered/.node-red/dbus-rotarex-dime/config"
+# Neben dem Installationsordner, nicht auf einem festen Pfad: Das Script
+# liegt in <ordner>/scripts/, die Konfiguration gehört nach <ordner>/config.
+# Nur so funktioniert ein abweichendes INSTALL_DIR wirklich.
+STANDARD_CONFIG = str(Path(__file__).resolve().parent.parent / "config")
 
 
 def _konfigurationsdatei_lesen(pfad):
@@ -124,6 +137,11 @@ BATTERY_UUID = "00002a19-0000-1000-8000-00805f9b34fb"  # Standard BLE Battery Le
 # -----------------------------------------------------------------------
 
 
+def _feld(wert):
+    """None wird in der CSV zu einem leeren Feld, nicht zur Zeichenkette None."""
+    return "" if wert is None else wert
+
+
 def ausgeben(result):
     """
     Schreibt das Ergebnis als eine Zeile JSON auf stdout.
@@ -133,6 +151,8 @@ def ausgeben(result):
     Kopfzeile, Zeitstempel in UTC nach ISO 8601:
 
         2026-08-18T19:41:03.512844+00:00,78,78,86
+
+    Fehlt der Batteriestand, bleibt das vierte Feld leer.
 
     Bewusst nur bei Erfolg: Eine Historie, in der Fehlversuche als leere
     Werte stehen, verzerrt jede spätere Verbrauchsauswertung.
@@ -148,9 +168,9 @@ def ausgeben(result):
                     "%s,%s,%s,%s\n"
                     % (
                         zeitstempel,
-                        result.get("gas_raw"),
-                        result.get("gas_percent"),
-                        result.get("battery_percent"),
+                        _feld(result.get("gas_raw")),
+                        _feld(result.get("gas_percent")),
+                        _feld(result.get("battery_percent")),
                     )
                 )
         except Exception as exc:  # noqa: BLE001
@@ -182,6 +202,13 @@ async def get_device(bus, max_tries=6):
         except Exception:
             pass  # Geraet noch nicht im Cache - Discovery starten und erneut versuchen
 
+        # Nach dem letzten Durchgang folgt kein Introspect-Versuch mehr, der
+        # von einem weiteren Scan profitieren koennte. Ihn trotzdem laufen zu
+        # lassen kostet nur Zeit - und die ist durch den Timeout des
+        # Node-RED-exec-Node begrenzt.
+        if attempt == max_tries - 1:
+            break
+
         try:
             await adapter.call_start_discovery()
         except Exception:
@@ -212,6 +239,8 @@ async def connect_with_retry(device, props_dev, max_tries=4):
             await device.call_connect()
             return True
         except Exception:
+            if attempt == max_tries - 1:
+                break  # danach wird ohnehin aufgegeben, die Pause braucht niemand
             await asyncio.sleep(3 + attempt)
     return False
 
