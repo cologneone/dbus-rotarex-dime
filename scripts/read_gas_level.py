@@ -9,7 +9,7 @@ ohne bleak oder gatttool.
 Getestet auf Venus OS (Victron Cerbo GX), sollte auf jedem Linux-System mit
 BlueZ und dbus_fast funktionieren.
 
-Version: 1.4.0
+Version: 1.5.0
 Historie:
   1.0.0 — Erstveröffentlichung
   1.1.0 — MAC und PIN kommen aus Umgebungsvariablen statt fest aus dem Code;
@@ -28,6 +28,13 @@ Historie:
           Wartezeit mehr nach dem jeweils letzten Versuch — das spart im
           schlechtesten Fall rund 18 Sekunden. Fehlender Batteriestand
           erzeugt in der Historie ein leeres Feld statt "None".
+  1.5.0 — Eigene Gesamt-Zeitgrenze. BlueZ kann beim Verbinden beliebig lange
+          blockieren, wenn eine andere Verbindung das Modul besetzt haelt —
+          ein Abruf lief so nachweislich elf Minuten. Statt sich darauf zu
+          verlassen, dass Node-RED den Prozess irgendwann abschiesst, gibt
+          das Script jetzt selbst rechtzeitig {"ok": false, "error":
+          "timeout"} aus und versucht anschliessend, die Verbindung zu
+          loesen.
 
 Gibt ein einzeiliges JSON-Objekt auf stdout aus, z.B.:
     {"ok": true, "gas_raw": 99, "gas_percent": 99, "battery_percent": 86}
@@ -44,6 +51,7 @@ Mögliche Fehlercodes:
     pin_write_failed                PIN liess sich nicht schreiben
     gas_read_failed                 Lesen des Füllstands scheiterte (ohne PIN: ATT 0x80)
     gas_value_empty                 Lesen ging durch, lieferte aber kein Byte
+    timeout                         Gesamtzeit ueberschritten, siehe ROTAREX_TIMEOUT
 
 Der Batteriestand ist bewusst optional: Fehlt er, ist der Abruf trotzdem
 erfolgreich, und der Grund steht als battery_error dabei.
@@ -61,6 +69,10 @@ Konfigurationsdatei mit Zeilen der Form NAME=Wert gelesen:
     ROTAREX_ADAPTER  Bluetooth-Adapter, Standard: hci0
     ROTAREX_HISTORY  Optional: Pfad zu einer CSV-Datei. Ist er gesetzt,
                      wird jeder erfolgreiche Abruf dort angehängt.
+    ROTAREX_TIMEOUT  Sekunden, nach denen der Abruf aufgibt. Standard: 85 —
+                     knapp unter dem 90-Sekunden-Timeout des
+                     Node-RED-exec-Node, damit das Script sein Ergebnis noch
+                     selbst ausgeben kann, statt abgeschossen zu werden.
     ROTAREX_CONFIG   Pfad der Konfigurationsdatei. Ohne Angabe wird sie
                      eine Ebene über diesem Script gesucht, also bei einer
                      Installation nach <ordner>/scripts/read_gas_level.py
@@ -126,6 +138,11 @@ MAC = einstellung("ROTAREX_MAC").upper()
 PIN = einstellung("ROTAREX_PIN")
 ADAPTER = einstellung("ROTAREX_ADAPTER", "hci0")
 HISTORY_FILE = einstellung("ROTAREX_HISTORY")
+
+try:
+    GESAMT_TIMEOUT = float(einstellung("ROTAREX_TIMEOUT", "85"))
+except ValueError:
+    GESAMT_TIMEOUT = 85.0
 
 ADAPTER_PATH = f"/org/bluez/{ADAPTER}"
 DEVICE_PATH = f"{ADAPTER_PATH}/dev_" + MAC.replace(":", "_")
@@ -390,6 +407,48 @@ async def main():
                 pass
 
 
+async def notfall_trennen():
+    """
+    Nach einem Timeout wurde die laufende Arbeit abgebrochen, womoeglich
+    mitten in einer offenen Verbindung. Da das Modul nur eine Verbindung
+    gleichzeitig zulaesst, wird hier ueber eine frische Sitzung noch einmal
+    ausdruecklich getrennt. Schlaegt das fehl, ist es auch nicht schlimmer
+    als vorher.
+    """
+    bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+    introspection = await bus.introspect("org.bluez", DEVICE_PATH)
+    geraet = bus.get_proxy_object("org.bluez", DEVICE_PATH, introspection)
+    await geraet.get_interface("org.bluez.Device1").call_disconnect()
+
+
+async def mit_zeitgrenze():
+    """
+    Deckel ueber allem. Einzelne BlueZ-Aufrufe haben keine eigene Zeitgrenze:
+    Haelt zum Beispiel die Hersteller-App die Verbindung, bleibt call_connect()
+    einfach stehen. Ohne diesen Deckel laeuft ein Abruf von Hand beliebig
+    lange weiter, und in Node-RED wird er hart abgeschossen — mit
+    abgeschnittener Ausgabe, die dann als Parse-Fehler ankommt.
+    """
+    try:
+        await asyncio.wait_for(main(), timeout=GESAMT_TIMEOUT)
+    except asyncio.TimeoutError:
+        try:
+            await asyncio.wait_for(notfall_trennen(), timeout=5)
+        except Exception:  # noqa: BLE001
+            pass
+        ausgeben(
+            {
+                "ok": False,
+                "error": "timeout",
+                "detail": (
+                    "kein Ergebnis binnen %.0f Sekunden — meist haelt eine "
+                    "andere Verbindung das Modul besetzt, etwa die "
+                    "Hersteller-App auf dem Handy" % GESAMT_TIMEOUT
+                ),
+            }
+        )
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(mit_zeitgrenze())
     sys.exit(0)
