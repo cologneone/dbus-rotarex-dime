@@ -104,7 +104,7 @@ hat, kann das weiterhin tun.
 | `ROTAREX_PIN` | ja | PIN vom Typenschild der BLE-Box |
 | `ROTAREX_ADAPTER` | nein | Bluetooth-Adapter, Standard `hci0` |
 | `ROTAREX_HISTORY` | nein | Pfad zu einer CSV-Datei; ist er gesetzt, wird jeder **erfolgreiche** Abruf dort angehängt |
-| `ROTAREX_TIMEOUT` | nein | Sekunden bis zum Abbruch, Standard `85` |
+| `ROTAREX_TIMEOUT` | nein | Gesamtbudget in Sekunden bis zur Ausgabe, Standard `85` |
 | `ROTAREX_CONFIG` | nein | Abweichender Pfad der Konfigurationsdatei |
 
 Die Konfigurationsdatei bekommt vom Installer die Rechte `600`. Der Grund für
@@ -144,22 +144,38 @@ den BlueZ-Cache gescannt werden, sind es im schlechtesten Fall etwa 70
 Sekunden — daher der `exec`-Timeout von 90 Sekunden im Flow.
 
 Wichtig zu wissen: **BlueZ-Aufrufe haben keine eigene Zeitgrenze.** Ist das
-Modul außer Reichweite oder hält eine andere Verbindung es besetzt — etwa die
-Rotarex-App auf dem Handy, denn mehr als eine gleichzeitig geht nicht —, dann
-bleibt `Connect()` einfach stehen. Ohne Gegenmaßnahme läuft ein Abruf dann
-beliebig lange; hier gemessen wurden schon elf Minuten, bis die Gegenstelle
-wieder freigab.
+Modul außer Reichweite oder hält eine andere Verbindung es besetzt — mehr als
+eine gleichzeitig lässt das Modul nämlich nicht zu —, dann bleibt `Connect()`
+einfach stehen. Ohne Gegenmaßnahme läuft ein Abruf dann beliebig lange; hier
+gemessen wurden schon elf Minuten, bis die Gegenstelle wieder freigab.
 
-Deshalb bricht das Script nach `ROTAREX_TIMEOUT` Sekunden selbst ab (Standard
-85, also knapp vor dem `exec`-Timeout), versucht noch zu trennen und meldet
-`timeout`. Das ist deutlich besser, als von Node-RED abgeschossen zu werden:
-Dann käme nämlich gar keine Ausgabe an, und im Flow stünde ein
-nichtssagender Parse-Fehler.
+Deshalb bricht das Script nach `ROTAREX_TIMEOUT` Sekunden selbst ab, versucht
+noch zu trennen und meldet `timeout`. Das ist deutlich besser, als von Node-RED
+abgeschossen zu werden: Dann käme nämlich gar keine Ausgabe an, und im Flow
+stünde ein nichtssagender Parse-Fehler.
+
+Der Wert ist bewusst ein **Gesamtbudget bis zur Ausgabe**, kein Budget nur für
+die Arbeit. Aufräumen kostet auch Zeit, und `asyncio.wait_for` wartet ab, bis
+die abgebrochene Aufgabe fertig aufgeräumt hat. Die 85 Sekunden teilen sich
+daher so auf:
+
+| Anteil | Sekunden |
+|---|---|
+| eigentlicher Abruf | 77 |
+| reguläres Trennen am Ende | 3 |
+| Trennversuch nach einem Timeout | 5 |
+
+Würde das Aufräumen oben drauf kommen statt abgezweigt zu werden, wären es 93
+Sekunden — und der `exec`-Node hätte bei 90 dazwischengefunkt, ausgerechnet
+bevor die Timeout-Meldung ausgegeben wird.
 
 Ein `timeout` ist also in aller Regel **kein Softwarefehler**, sondern die
 Aussage „da war gerade niemand zu sprechen“. Beim nächsten Abruf ist der Wert
-meist wieder da. Wenn es dauerhaft auftritt: Handy-App trennen, Reichweite und
-die beiden AAA-Batterien der Sendebox prüfen.
+meist wieder da. Mögliche Blockierer: die Hersteller-App auf dem Handy, ein
+von Hand gestarteter zweiter Abruf, oder schlicht fehlende Reichweite. Die
+regulären 15-Minuten-Polls können sich wegen dieser Zeitgrenze nicht
+gegenseitig blockieren. Tritt es dauerhaft auf: App trennen, Reichweite und die
+beiden AAA-Batterien der Sendebox prüfen.
 
 ### Tank im GX einrichten
 
@@ -269,7 +285,9 @@ du selbst löschen — das Script sagt dir, wie.
   Rotarex-App verbunden ist, läuft der Abruf auf dem Cerbo ins Leere — und
   umgekehrt. Deshalb trennt das Script am Ende immer, auch im Fehlerfall.
 - **BlueZ-Aufrufe blockieren ohne eigene Zeitgrenze** — siehe den Abschnitt
-  zur Laufzeit weiter oben. Deshalb der eingebaute Deckel.
+  zur Laufzeit weiter oben. Deshalb der eingebaute Deckel, und deshalb hat
+  auch das Trennen im Aufräumen ein eigenes Budget: Ohne das könnte ein
+  hängendes `Disconnect()` den Deckel wieder aushöhlen.
 
 ## Danksagung
 
