@@ -1,8 +1,9 @@
 # dbus-rotarex-dime
 
-Liest den Füllstand einer **Alugas/Rotarex-Gasflasche mit DIME/SRG-1-WAVE
-Bluetooth-Modul** aus und zeigt sie als echten Tank im **Victron Cerbo GX /
-VRM** an – über Node-RED, ohne bleak, ohne gatttool, direkt per BlueZ/D-Bus.
+Liest den Füllstand einer **Alugas/Rotarex-Gasflasche mit DIMES-WAVE-Modul**
+(im BLE-Scan als `SRG-1-WAVE`) aus und zeigt sie als echten Tank im
+**Victron Cerbo GX / VRM** an – über Node-RED, ohne bleak, ohne gatttool,
+direkt per BlueZ/D-Bus.
 
 ![Tankanzeige im Cerbo GX: LPG bei 61 Prozent, 13 von 21 Litern](docs/cerbo-tanks.png)
 
@@ -41,7 +42,7 @@ Details zum vollständigen GATT-Mapping stehen in
   installiert (für die virtuelle Tank-Anzeige — ohne dieses Paket funktioniert
   das Auslesen trotzdem, nur ohne GX-Anzeige)
 - `dbus_fast` (Python) muss auf dem Gerät verfügbar sein
-- Eine Alugas/Rotarex-Flasche mit DIME/SRG-1-WAVE-Modul in Bluetooth-Reichweite
+- Eine Alugas/Rotarex-Flasche mit DIMES-WAVE-Modul in Bluetooth-Reichweite
 
 `install.sh` prüft das alles vorab und sagt, was fehlt — lieber eine klare
 Meldung als später ein Bluetooth-Fehler, der in Wahrheit ein fehlendes
@@ -59,8 +60,12 @@ Das Script landet in
 `/data/home/nodered/.node-red/dbus-rotarex-dime/scripts/`. Alles unterhalb von
 `/data/` überlebt Venus-OS-Firmware-Updates; dieser Unterordner gehört
 zusätzlich dem Benutzer `nodered` und ist damit der einzige Ort, an dem
-Node-RED später auch Konfiguration und Historie anlegen darf. Ein anderer
-Zielordner geht mit `INSTALL_DIR=/pfad/nach/wunsch bash install.sh`.
+Node-RED später auch Konfiguration und Historie anlegen darf.
+
+Ein anderer Zielordner geht mit `INSTALL_DIR=/pfad/nach/wunsch bash install.sh`
+und wirkt vollständig: Das Script sucht seine Konfiguration **relativ zu sich
+selbst** — eine Ebene über `scripts/` —, es ist also kein Pfad im Code zu
+pflegen. Nur der Aufruf im `exec`-Node des Flows muss dann angepasst werden.
 
 Danach:
 
@@ -88,11 +93,10 @@ virtuelle Tank:
 ### Konfiguration
 
 Alles über benannte Einstellungen, nichts wird im Code eingetragen. Gelesen
-wird aus der Konfigurationsdatei
-`/data/home/nodered/.node-red/dbus-rotarex-dime/config` (Zeilen der Form
-`NAME=Wert`, `#` leitet einen Kommentar ein). **Umgebungsvariablen gleichen
-Namens haben Vorrang**, wer also lieber alles im `exec`-Node stehen hat, kann
-das weiterhin tun.
+wird aus der Konfigurationsdatei neben dem Installationsordner (Zeilen der
+Form `NAME=Wert`, `#` leitet einen Kommentar ein). **Umgebungsvariablen
+gleichen Namens haben Vorrang**, wer also lieber alles im `exec`-Node stehen
+hat, kann das weiterhin tun.
 
 | Name | Pflicht | Bedeutung |
 |---|---|---|
@@ -100,6 +104,7 @@ das weiterhin tun.
 | `ROTAREX_PIN` | ja | PIN vom Typenschild der BLE-Box |
 | `ROTAREX_ADAPTER` | nein | Bluetooth-Adapter, Standard `hci0` |
 | `ROTAREX_HISTORY` | nein | Pfad zu einer CSV-Datei; ist er gesetzt, wird jeder **erfolgreiche** Abruf dort angehängt |
+| `ROTAREX_TIMEOUT` | nein | Sekunden bis zum Abbruch, Standard `85` |
 | `ROTAREX_CONFIG` | nein | Abweichender Pfad der Konfigurationsdatei |
 
 Die Konfigurationsdatei bekommt vom Installer die Rechte `600`. Der Grund für
@@ -126,9 +131,35 @@ ist.
 | `pin_write_failed` | PIN ließ sich nicht schreiben (Details in `detail`) |
 | `gas_read_failed` | Lesen scheiterte — bei `ATT error: 0x80` hat der PIN nicht gegriffen |
 | `gas_value_empty` | Lesen ging durch, lieferte aber kein Byte |
+| `timeout` | Gesamtzeit überschritten, siehe unten |
 
 Der Batteriestand des Senders ist bewusst optional: Fehlt er, gilt der Abruf
-trotzdem als erfolgreich, und der Grund steht als `battery_error` dabei.
+trotzdem als erfolgreich, der Grund steht als `battery_error` dabei, und in der
+Historie bleibt das vierte Feld leer.
+
+### Laufzeit und Erreichbarkeit
+
+Ein gewöhnlicher Abruf dauert rund 30 Sekunden. Muss das Gerät erst wieder in
+den BlueZ-Cache gescannt werden, sind es im schlechtesten Fall etwa 70
+Sekunden — daher der `exec`-Timeout von 90 Sekunden im Flow.
+
+Wichtig zu wissen: **BlueZ-Aufrufe haben keine eigene Zeitgrenze.** Ist das
+Modul außer Reichweite oder hält eine andere Verbindung es besetzt — etwa die
+Rotarex-App auf dem Handy, denn mehr als eine gleichzeitig geht nicht —, dann
+bleibt `Connect()` einfach stehen. Ohne Gegenmaßnahme läuft ein Abruf dann
+beliebig lange; hier gemessen wurden schon elf Minuten, bis die Gegenstelle
+wieder freigab.
+
+Deshalb bricht das Script nach `ROTAREX_TIMEOUT` Sekunden selbst ab (Standard
+85, also knapp vor dem `exec`-Timeout), versucht noch zu trennen und meldet
+`timeout`. Das ist deutlich besser, als von Node-RED abgeschossen zu werden:
+Dann käme nämlich gar keine Ausgabe an, und im Flow stünde ein
+nichtssagender Parse-Fehler.
+
+Ein `timeout` ist also in aller Regel **kein Softwarefehler**, sondern die
+Aussage „da war gerade niemand zu sprechen“. Beim nächsten Abruf ist der Wert
+meist wieder da. Wenn es dauerhaft auftritt: Handy-App trennen, Reichweite und
+die beiden AAA-Batterien der Sendebox prüfen.
 
 ### Tank im GX einrichten
 
@@ -162,9 +193,10 @@ Vier Spalten, keine Kopfzeile, Zeitstempel in UTC nach ISO 8601:
 
 Also `Zeitstempel,Rohwert,Prozent,Sender-Batterie`. Geschrieben wird nur bei
 erfolgreichem Abruf — eine Historie, in der Fehlversuche als leere Werte
-stehen, verzerrt jede spätere Verbrauchsauswertung. Scheitert das Schreiben,
-steht der Grund als `history_error` im JSON-Ergebnis, und der Flow zeigt ihn in
-der Statuszeile an.
+stehen, verzerrt jede spätere Verbrauchsauswertung. Fehlt nur der
+Batteriestand, bleibt das vierte Feld leer. Scheitert das Schreiben, steht der
+Grund als `history_error` im JSON-Ergebnis, und der Flow zeigt ihn in der
+Statuszeile an.
 
 **Achtung bei Venus OS:** Node-RED läuft als Benutzer `nodered` und darf
 nicht direkt nach `/data/` schreiben. Beschreibbar ist
@@ -236,10 +268,8 @@ du selbst löschen — das Script sagt dir, wie.
 - Das BLE-Modul lässt **nur eine Verbindung gleichzeitig** zu. Solange die
   Rotarex-App verbunden ist, läuft der Abruf auf dem Cerbo ins Leere — und
   umgekehrt. Deshalb trennt das Script am Ende immer, auch im Fehlerfall.
-- Ein Abruf kann im schlechtesten Fall (Gerät nicht im Cache, mehrere
-  Discovery- und Connect-Durchgänge) knapp anderthalb Minuten dauern. Der
-  Timeout des `exec`-Node steht deshalb auf 90 Sekunden — wer ihn kleiner
-  setzt, bekommt gelegentlich abgeschnittene Läufe.
+- **BlueZ-Aufrufe blockieren ohne eigene Zeitgrenze** — siehe den Abschnitt
+  zur Laufzeit weiter oben. Deshalb der eingebaute Deckel.
 
 ## Danksagung
 
