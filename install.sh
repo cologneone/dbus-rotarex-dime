@@ -4,7 +4,7 @@
 # Prüft die Voraussetzungen, kopiert das Auslese-Script dorthin, wo Node-RED
 # es lesen und schreiben darf, und legt eine Konfigurationsdatei an.
 #
-# Version: 1.3.0
+# Version: 1.4.0
 # Historie:
 #   1.0.0 — Erstveröffentlichung
 #   1.1.0 — Konfiguration läuft über Umgebungsvariablen statt über
@@ -15,6 +15,9 @@
 #           sonst nie.
 #   1.3.0 — Vorabprüfung der Voraussetzungen; Konfigurationsdatei für MAC
 #           und PIN, damit die Zugangsdaten nicht im Node-RED-Flow stehen
+#   1.4.0 — INSTALL_DIR wirkt jetzt wirklich überall: die Vorlage schreibt
+#           den Historien-Pfad in den gewählten Ordner, und das Script
+#           findet seine Konfiguration von selbst daneben
 #
 # Nutzung (auf dem Cerbo/Venus-OS-Gerät per SSH):
 #   bash install.sh
@@ -83,15 +86,20 @@ cp -v scripts/read_gas_level.py "$INSTALL_DIR/scripts/"
 chmod +x "$INSTALL_DIR/scripts/read_gas_level.py"
 
 if [ ! -f "$CONFIG_FILE" ]; then
-  cat > "$CONFIG_FILE" <<'VORLAGE'
+  cat > "$CONFIG_FILE" <<VORLAGE
 # Konfiguration fuer read_gas_level.py
+#
+# Diese Datei wird vom Script automatisch gefunden, solange sie eine Ebene
+# ueber ihm liegt - also neben dem Ordner "scripts". Ein anderer Ort geht
+# ueber die Umgebungsvariable ROTAREX_CONFIG.
+#
 # MAC und PIN stehen auf dem Typenschild der BLE-Box an der Flasche.
 ROTAREX_MAC=AA:BB:CC:DD:EE:FF
 ROTAREX_PIN=1234
 
 # Optional:
 ROTAREX_ADAPTER=hci0
-ROTAREX_HISTORY=/data/home/nodered/.node-red/dbus-rotarex-dime/history.csv
+ROTAREX_HISTORY=$INSTALL_DIR/history.csv
 VORLAGE
   echo "Konfigurationsvorlage angelegt: $CONFIG_FILE"
 else
@@ -123,12 +131,15 @@ echo "Node-RED-Flow importieren:"
 echo "  1. Node-RED-Oberflaeche oeffnen (i.d.R. https://<Cerbo-IP>:1881)"
 echo "  2. Menue -> Import -> Datei auswaehlen: flows/rotarex-gasflasche.json"
 echo "  3. Im 'exec'-Node nur noch den Pfad pruefen — MAC und PIN stehen"
-echo "     in der Konfigurationsdatei und muessen nicht in den Flow"
+echo "     in der Konfigurationsdatei und muessen nicht in den Flow."
+echo "     Bei abweichendem INSTALL_DIR hier den Pfad anpassen:"
+echo "       python3 $INSTALL_DIR/scripts/read_gas_level.py 2>&1"
 echo "  4. Deploy klicken"
 echo
 echo "Historie: $INSTALL_DIR/history.csv"
 echo "  Format: Zeitstempel (UTC),gas_raw,gas_percent,battery_percent"
-echo "  Ohne Kopfzeile, eine Zeile je erfolgreichem Abruf."
+echo "  Ohne Kopfzeile, eine Zeile je erfolgreichem Abruf. Fehlt der"
+echo "  Batteriestand, bleibt das vierte Feld leer."
 echo
 echo "Spaeteres Aktualisieren des Scripts ohne erneutes Auschecken:"
 echo "  curl -fsSL -o $INSTALL_DIR/scripts/read_gas_level.py \\"
