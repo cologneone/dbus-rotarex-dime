@@ -84,6 +84,11 @@ Then:
 4. Import `flows/rotarex-gasflasche.json` into Node-RED (menu → Import) and hit
    Deploy. Nothing else needs to be filled in inside the flow.
 
+   The first read runs two seconds after the deploy and often fails with
+   `timeout`, because the process before it is still holding the Bluetooth
+   connection. That is not a failed installation — the next 15-minute cycle
+   delivers.
+
 This is what the flow looks like — timer, read node, parser, MQTT and the virtual
 tank:
 
@@ -179,16 +184,38 @@ The virtual tank appears as an ordinary device, with Node-RED as its source:
 
 ![Device details on the Cerbo: connection Node-RED, product Virtual tank sensor](docs/cerbo-lpg-geraet.png)
 
-Under *Setup*, set capacity and fluid type — for an 11 kg bottle that is 21 litres
-and LPG. The UI works out the rest:
+Capacity and fluid type come with the flow: the **LPG** node carries them as
+`tank_capacity` (0.021 m³ = 21 litres) and `fluid_type` (8 = LPG). Nothing needs
+to be set in the GX after importing — this is what it looks like there:
 
 ![Tank settings on the Cerbo: capacity 21 litres, fluid type LPG](docs/cerbo-lpg-setup.png)
 
-**Note:** the function node in the flow sends `/Capacity` and `/FluidType` with
-*every* read. A different setting made in the GX UI is therefore overwritten after
-15 minutes at the latest. If you would rather maintain the capacity there, remove
-those two fields from the node — if you have a different bottle size, put it in
-(in m³, `0.021` being 21 litres).
+#### A different bottle size: two places, change both
+
+| # | Exact location | Value for 11 kg |
+|---|---|---|
+| 1 | node **LPG** → field *Capacity* | `0.021` |
+| 2 | function **Parse Ergebnis** → constant `KAPAZITAET_M3` | `0.021` |
+
+Always in **m³**: 5 kg = `0.0105`, 11 kg = `0.021`, 14 kg = `0.0275`.
+
+If the two disagree, the VRM console computes with one number and the GX Touch
+display with the other — the percentage stays correct, only the litres drift
+apart.
+
+Why two places at all? The `victron-virtual` node creates `/Capacity` and
+`/FluidType` at startup from **its own configuration** and ignores both paths in
+the payload. Measured on 12 Sep 2026: a `/Capacity` set by hand to `0.025` was
+still unchanged after a successful read. From the payload the node takes only
+`/Level`, `/Remaining` and `/Status` — and `/Remaining`, the litre value, has to
+come from the flow. Change the capacity in only one of the two places and you get
+no error, just two different readings.
+
+**Do not remove `/Remaining`.** The VRM console computes the litre value itself
+from capacity × level, so it looks right even without it. The physical GX Touch
+display does not: it shows the last `/Remaining` value it ever received and
+freezes it. That is exactly how it came to show 8 of 21 litres at 99 percent
+while VRM next to it showed 21 of 21.
 
 ### Writing a history
 
