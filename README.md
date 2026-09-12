@@ -1,5 +1,7 @@
 # dbus-rotarex-dime
 
+*Deutsche Fassung · [English version](README.en.md)*
+
 Liest den Füllstand einer **Alugas/Rotarex-Gasflasche mit DIMES-WAVE-Modul**
 (im BLE-Scan als `SRG-1-WAVE`) aus und zeigt sie als echten Tank im
 **Victron Cerbo GX / VRM** an – über Node-RED, ohne bleak, ohne gatttool,
@@ -84,6 +86,10 @@ Danach:
 
 4. `flows/rotarex-gasflasche.json` in Node-RED importieren (Menü → Import),
    Deploy klicken. Im Flow ist nichts mehr einzutragen.
+
+   Der erste Abruf läuft zwei Sekunden nach dem Deploy und scheitert oft mit
+   `timeout`, weil der Prozess davor die Bluetooth-Verbindung noch hält. Das ist
+   kein Fehlschlag der Installation — der nächste 15-Minuten-Takt liefert.
 
 So sieht der Flow danach aus — Timer, Auslese-Node, Parser, MQTT und der
 virtuelle Tank:
@@ -183,17 +189,39 @@ Der virtuelle Tank taucht als ganz normales Gerät auf, mit Node-RED als Quelle:
 
 ![Gerätedetails im Cerbo: Verbindung Node-RED, Produkt Virtual tank sensor](docs/cerbo-lpg-geraet.png)
 
-Unter *Setup* noch Kapazität und Flüssigkeitstyp setzen — für eine 11-kg-Flasche
-sind das 21 Liter und LPG. Den Rest rechnet die Oberfläche selbst:
+Kapazität und Flüssigkeitstyp bringt der Flow schon mit: im Knoten **LPG**
+stehen sie als `tank_capacity` (0.021 m³ = 21 Liter) und `fluid_type` (8 = LPG).
+Im GX ist nach dem Import nichts einzustellen — so sieht es dort aus:
 
 ![Tank-Einstellungen im Cerbo: Kapazität 21 Liter, Flüssigkeitstyp LPG](docs/cerbo-lpg-setup.png)
 
-**Zu beachten:** Der Funktionsknoten im Flow schickt `/Capacity` und
-`/FluidType` bei *jedem* Abruf mit. Eine abweichende Einstellung in der
-GX-Oberfläche ist damit spätestens nach 15 Minuten wieder überschrieben. Wer
-seine Kapazität lieber dort pflegt, nimmt die beiden Felder im Knoten heraus —
-wer eine andere Flaschengröße hat, trägt sie dort ein (Angabe in m³, `0.021`
-sind 21 Liter).
+#### Andere Flaschengröße: zwei Stellen, beide ändern
+
+| Stelle | Wo genau | Wert für 11 kg |
+|---|---|---|
+| 1 | Knoten **LPG** → Feld *Capacity* | `0.021` |
+| 2 | Funktion **Parse Ergebnis** → Konstante `KAPAZITAET_M3` | `0.021` |
+
+Angabe immer in **m³**: 5 kg = `0.0105`, 11 kg = `0.021`, 14 kg = `0.0275`.
+
+Stimmen die beiden nicht überein, rechnet die VRM-Konsole mit der einen und das
+GX-Touch-Display mit der anderen Zahl — die Prozentanzeige bleibt dabei richtig,
+nur die Liter driften auseinander.
+
+Warum überhaupt zwei Stellen? Der `victron-virtual`-Knoten legt `/Capacity` und
+`/FluidType` beim Start aus **seiner eigenen Konfiguration** an und ignoriert
+beide Pfade im Payload. Nachgemessen am 12.09.2026: ein von Hand auf `0.025`
+gesetztes `/Capacity` stand auch nach einem erfolgreichen Abruf unverändert da.
+Aus dem Payload übernimmt der Knoten nur `/Level`, `/Remaining` und `/Status` —
+und `/Remaining`, also der Literwert, muss aus dem Flow kommen. Wer die
+Kapazität nur an einer der beiden Stellen ändert, bekommt keinen Fehler,
+sondern zwei verschiedene Anzeigen.
+
+**`/Remaining` nicht herausnehmen.** Die VRM-Konsole rechnet den Literwert selbst
+aus Kapazität × Füllstand und sieht deshalb auch ohne `/Remaining` richtig aus.
+Das physische GX-Touch-Display tut das nicht: es zeigt den letzten je empfangenen
+`/Remaining`-Wert und friert ihn ein. Genau so standen dort 8 von 21 Litern bei
+99 Prozent, während VRM daneben 21 von 21 zeigte.
 
 ### Historie mitschreiben
 
